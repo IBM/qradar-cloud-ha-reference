@@ -1,0 +1,1018 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: QRadar High Availability Reference Architecture - VPC
+  Infrastructure with EC2 Instances
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: EC2 Configuration
+        Parameters:
+          - LatestAmiId
+          - KeyPairName
+          - ConsoleInstanceType
+          - EPInstanceType
+          - DNInstanceType
+
+Parameters:
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/marketplace/prod-7qke7of5vjdp6/latest
+    Description: >
+      SSM path to the QRadar Marketplace AMI. AWS resolves this to the current
+      AMI ID at deploy time. The deploying account must have an active
+      subscription to the QRadar listing before deploying this stack.
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access to instances
+
+  ConsoleInstanceType:
+    Type: String
+    Default: m5.4xlarge
+    Description: Instance type for Console instances
+    AllowedValues:
+      - m5.4xlarge
+      - c5.4xlarge
+
+  EPInstanceType:
+    Type: String
+    Default: m5.4xlarge
+    Description: Instance type for Event Processor instances
+    AllowedValues:
+      - m5.4xlarge
+      - c5.4xlarge
+
+  DNInstanceType:
+    Type: String
+    Default: m5.4xlarge
+    Description: Instance type for Data Node instances
+    AllowedValues:
+      - m5.4xlarge
+      - c5.4xlarge
+
+  DataVolumeSize:
+    Type: Number
+    Default: 300
+    MinValue: 250
+    MaxValue: 16384
+    Description: Size of additional EBS data volume in GB (gp3)
+
+Resources:
+  # ==========================================
+  # IAM Role for SSM Access
+  # ==========================================
+
+  EC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: QRadarEC2SSMRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Tags:
+        - Key: Name
+          Value: qradar-ec2-ssm-role
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: QRadarEC2InstanceProfile
+      Roles:
+        - !Ref EC2SSMRole
+
+  # ==========================================
+  # VPC and Internet Gateway
+  # ==========================================
+
+  QRadarVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: qradar-ha-reference
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: qradar-ha-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref QRadarVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ==========================================
+  # Public Subnets
+  # ==========================================
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref QRadarVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: qradar-public-subnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref QRadarVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: qradar-public-subnet-2
+
+  # ==========================================
+  # Private Subnets
+  # ==========================================
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref QRadarVPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: qradar-private-subnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref QRadarVPC
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: qradar-private-subnet-2
+
+  # ==========================================
+  # Elastic IPs for NAT Gateways
+  # ==========================================
+
+  NATGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: qradar-nat-gateway-1-eip
+
+  NATGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: qradar-nat-gateway-2-eip
+
+  # ==========================================
+  # NAT Gateways
+  # ==========================================
+
+  NATGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: qradar-nat-gateway-1
+
+  NATGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: qradar-nat-gateway-2
+
+  # ==========================================
+  # Route Tables
+  # ==========================================
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref QRadarVPC
+      Tags:
+        - Key: Name
+          Value: qradar-public-route-table
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref QRadarVPC
+      Tags:
+        - Key: Name
+          Value: qradar-private-route-table-1
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref QRadarVPC
+      Tags:
+        - Key: Name
+          Value: qradar-private-route-table-2
+
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # ==========================================
+  # Security Groups
+  # ==========================================
+
+  ConsoleSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: qradar-console-sg
+      GroupDescription: Security group for QRadar Console instances
+      VpcId: !Ref QRadarVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ConsoleNLBSecurityGroup
+          Description: HTTPS from Console NLB
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/16
+          Description: SSH from VPC
+        - IpProtocol: -1
+          SourceSecurityGroupId: !Ref QRadarInternalSecurityGroup
+          Description: All traffic from QRadar instances
+      Tags:
+        - Key: Name
+          Value: qradar-console-sg
+
+  EPSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: qradar-ep-sg
+      GroupDescription: Security group for QRadar Event Processor instances
+      VpcId: !Ref QRadarVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 514
+          ToPort: 514
+          SourceSecurityGroupId: !Ref EPNLBSecurityGroup
+          Description: Syslog TCP from EP NLB
+        - IpProtocol: udp
+          FromPort: 514
+          ToPort: 514
+          SourceSecurityGroupId: !Ref EPNLBSecurityGroup
+          Description: Syslog UDP from EP NLB
+        - IpProtocol: tcp
+          FromPort: 6514
+          ToPort: 6514
+          SourceSecurityGroupId: !Ref EPNLBSecurityGroup
+          Description: Syslog TLS from EP NLB
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/16
+          Description: SSH from VPC
+        - IpProtocol: -1
+          SourceSecurityGroupId: !Ref QRadarInternalSecurityGroup
+          Description: All traffic from QRadar instances
+      Tags:
+        - Key: Name
+          Value: qradar-ep-sg
+
+  DataNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: qradar-datanode-sg
+      GroupDescription: Security group for QRadar Data Node instances
+      VpcId: !Ref QRadarVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/16
+          Description: SSH from VPC
+        - IpProtocol: -1
+          SourceSecurityGroupId: !Ref QRadarInternalSecurityGroup
+          Description: All traffic from QRadar instances
+      Tags:
+        - Key: Name
+          Value: qradar-datanode-sg
+
+  QRadarInternalSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: qradar-internal-sg
+      GroupDescription: Security group for internal QRadar communication (overlay network, IPSec)
+      VpcId: !Ref QRadarVPC
+      Tags:
+        - Key: Name
+          Value: qradar-internal-sg
+
+  QRadarInternalSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref QRadarInternalSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref QRadarInternalSecurityGroup
+      Description: Allow all traffic within QRadar internal security group
+
+  ConsoleNLBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: qradar-console-nlb-sg
+      GroupDescription: Security group for Console Network Load Balancer
+      VpcId: !Ref QRadarVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS from Internet
+      Tags:
+        - Key: Name
+          Value: qradar-console-nlb-sg
+
+  EPNLBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: qradar-ep-nlb-sg
+      GroupDescription: Security group for Event Processor Network Load Balancer (Internal)
+      VpcId: !Ref QRadarVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 514
+          ToPort: 514
+          CidrIp: 10.0.0.0/16
+          Description: Syslog TCP from VPC
+        - IpProtocol: udp
+          FromPort: 514
+          ToPort: 514
+          CidrIp: 10.0.0.0/16
+          Description: Syslog UDP from VPC
+        - IpProtocol: tcp
+          FromPort: 6514
+          ToPort: 6514
+          CidrIp: 10.0.0.0/16
+          Description: Syslog TLS from VPC
+      Tags:
+        - Key: Name
+          Value: qradar-ep-nlb-sg
+
+  # ==========================================
+  # Network Load Balancers
+  # ==========================================
+
+  ConsoleNLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: qradar-console-nlb
+      Type: network
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ConsoleNLBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-console-nlb
+
+  ConsoleTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: qradar-console-tg
+      Port: 443
+      Protocol: TCP
+      VpcId: !Ref QRadarVPC
+      HealthCheckEnabled: true
+      HealthCheckProtocol: TCP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      TargetType: instance
+      Targets:
+        - Id: !Ref ConsolePrimary
+          Port: 443
+        - Id: !Ref ConsoleSecondary
+          Port: 443
+      Tags:
+        - Key: Name
+          Value: qradar-console-tg
+
+  ConsoleNLBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ConsoleTargetGroup
+      LoadBalancerArn: !Ref ConsoleNLB
+      Port: 443
+      Protocol: TCP
+
+  EPNLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: qradar-ep-nlb
+      Type: network
+      Scheme: internal
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref EPNLBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-ep-nlb
+
+  EPTargetGroupTCP514:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: qradar-ep-tcp-514-tg
+      Port: 514
+      Protocol: TCP
+      VpcId: !Ref QRadarVPC
+      HealthCheckEnabled: true
+      HealthCheckProtocol: TCP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      TargetType: instance
+      Targets:
+        - Id: !Ref EPPrimary
+          Port: 514
+        - Id: !Ref EPSecondary
+          Port: 514
+      Tags:
+        - Key: Name
+          Value: qradar-ep-tcp-514-tg
+
+  EPTargetGroupTCP6514:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: qradar-ep-tcp-6514-tg
+      Port: 6514
+      Protocol: TCP
+      VpcId: !Ref QRadarVPC
+      HealthCheckEnabled: true
+      HealthCheckProtocol: TCP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      TargetType: instance
+      Targets:
+        - Id: !Ref EPPrimary
+          Port: 6514
+        - Id: !Ref EPSecondary
+          Port: 6514
+      Tags:
+        - Key: Name
+          Value: qradar-ep-tcp-6514-tg
+
+  EPNLBListenerTCP514:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref EPTargetGroupTCP514
+      LoadBalancerArn: !Ref EPNLB
+      Port: 514
+      Protocol: TCP
+
+  EPNLBListenerTCP6514:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref EPTargetGroupTCP6514
+      LoadBalancerArn: !Ref EPNLB
+      Port: 6514
+      Protocol: TCP
+
+
+  # ==========================================
+  # EC2 Instances - Private Subnet 1 (Primary)
+  # ==========================================
+
+  ConsolePrimary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref ConsoleInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref ConsoleSecurityGroup
+        - !Ref QRadarInternalSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-console-primary
+        - Key: Role
+          Value: Console
+        - Key: HARole
+          Value: Primary
+        - Key: AZ
+          Value: AZ1
+
+  EPPrimary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref EPInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref EPSecurityGroup
+        - !Ref QRadarInternalSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-ep-primary
+        - Key: Role
+          Value: EventProcessor
+        - Key: HARole
+          Value: Primary
+        - Key: AZ
+          Value: AZ1
+
+  DN1Primary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref DNInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref DataNodeSecurityGroup
+        - !Ref QRadarInternalSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-dn1-primary
+        - Key: Role
+          Value: DataNode1
+        - Key: HARole
+          Value: Primary
+        - Key: AZ
+          Value: AZ1
+
+  DN2Primary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref DNInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref DataNodeSecurityGroup
+        - !Ref QRadarInternalSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-dn2-primary
+        - Key: Role
+          Value: DataNode2
+        - Key: HARole
+          Value: Primary
+        - Key: AZ
+          Value: AZ1
+
+  # ==========================================
+  # EC2 Instances - Private Subnet 2 (Secondary)
+  # ==========================================
+
+  ConsoleSecondary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref ConsoleInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref ConsoleSecurityGroup
+        - !Ref QRadarInternalSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-console-secondary
+        - Key: Role
+          Value: Console
+        - Key: HARole
+          Value: Secondary
+        - Key: AZ
+          Value: AZ2
+
+  EPSecondary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref EPInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EPSecurityGroup
+        - !Ref QRadarInternalSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-ep-secondary
+        - Key: Role
+          Value: EventProcessor
+        - Key: HARole
+          Value: Secondary
+        - Key: AZ
+          Value: AZ2
+
+  DN1Secondary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref DNInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref DataNodeSecurityGroup
+        - !Ref QRadarInternalSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-dn1-secondary
+        - Key: Role
+          Value: DataNode1
+        - Key: HARole
+          Value: Secondary
+        - Key: AZ
+          Value: AZ2
+
+  DN2Secondary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref DNInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref DataNodeSecurityGroup
+        - !Ref QRadarInternalSecurityGroup
+      Tags:
+        - Key: Name
+          Value: qradar-dn2-secondary
+        - Key: Role
+          Value: DataNode2
+        - Key: HARole
+          Value: Secondary
+        - Key: AZ
+          Value: AZ2
+
+  # ==========================================
+  # EBS Volumes for EC2 Instances
+  # ==========================================
+
+  ConsolePrimaryDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: qradar-console-primary-data
+
+  ConsolePrimaryVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref ConsolePrimary
+      VolumeId: !Ref ConsolePrimaryDataVolume
+
+  EPPrimaryDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: qradar-ep-primary-data
+
+  EPPrimaryVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref EPPrimary
+      VolumeId: !Ref EPPrimaryDataVolume
+
+  DN1PrimaryDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: qradar-dn1-primary-data
+
+  DN1PrimaryVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref DN1Primary
+      VolumeId: !Ref DN1PrimaryDataVolume
+
+  DN2PrimaryDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: qradar-dn2-primary-data
+
+  DN2PrimaryVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref DN2Primary
+      VolumeId: !Ref DN2PrimaryDataVolume
+
+  ConsoleSecondaryDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: qradar-console-secondary-data
+
+  ConsoleSecondaryVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref ConsoleSecondary
+      VolumeId: !Ref ConsoleSecondaryDataVolume
+
+  EPSecondaryDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: qradar-ep-secondary-data
+
+  EPSecondaryVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref EPSecondary
+      VolumeId: !Ref EPSecondaryDataVolume
+
+  DN1SecondaryDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: qradar-dn1-secondary-data
+
+  DN1SecondaryVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref DN1Secondary
+      VolumeId: !Ref DN1SecondaryDataVolume
+
+  DN2SecondaryDataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: qradar-dn2-secondary-data
+
+  DN2SecondaryVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref DN2Secondary
+      VolumeId: !Ref DN2SecondaryDataVolume
+
+# ==========================================
+# Outputs
+# ==========================================
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref QRadarVPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC-ID
+
+  PublicSubnet1Id:
+    Description: Public Subnet 1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnet1-ID
+
+  PublicSubnet2Id:
+    Description: Public Subnet 2 ID
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnet2-ID
+
+  PrivateSubnet1Id:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet1-ID
+
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet2-ID
+
+  ConsoleNLBDNSName:
+    Description: DNS name of the Console Network Load Balancer
+    Value: !GetAtt ConsoleNLB.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-ConsoleNLB-DNS
+
+  EPNLBDNSName:
+    Description: DNS name of the Event Processor Network Load Balancer
+    Value: !GetAtt EPNLB.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-EPNLB-DNS
+
+  ConsolePrimaryInstanceId:
+    Description: Console Primary Instance ID
+    Value: !Ref ConsolePrimary
+
+  ConsoleSecondaryInstanceId:
+    Description: Console Secondary Instance ID
+    Value: !Ref ConsoleSecondary
+
+  EPPrimaryInstanceId:
+    Description: Event Processor Primary Instance ID
+    Value: !Ref EPPrimary
+
+  EPSecondaryInstanceId:
+    Description: Event Processor Secondary Instance ID
+    Value: !Ref EPSecondary
+
+  DN1PrimaryInstanceId:
+    Description: Data Node 1 Primary Instance ID
+    Value: !Ref DN1Primary
+
+  DN1SecondaryInstanceId:
+    Description: Data Node 1 Secondary Instance ID
+    Value: !Ref DN1Secondary
+
+  DN2PrimaryInstanceId:
+    Description: Data Node 2 Primary Instance ID
+    Value: !Ref DN2Primary
+
+  DN2SecondaryInstanceId:
+    Description: Data Node 2 Secondary Instance ID
+    Value: !Ref DN2Secondary
+
+  ConsolePrimaryPrivateIP:
+    Description: Console Primary Private IP
+    Value: !GetAtt ConsolePrimary.PrivateIp
+
+  ConsoleSecondaryPrivateIP:
+    Description: Console Secondary Private IP
+    Value: !GetAtt ConsoleSecondary.PrivateIp
+
+  EPPrimaryPrivateIP:
+    Description: Event Processor Primary Private IP
+    Value: !GetAtt EPPrimary.PrivateIp
+
+  EPSecondaryPrivateIP:
+    Description: Event Processor Secondary Private IP
+    Value: !GetAtt EPSecondary.PrivateIp
+
+  ConsoleAccessURL:
+    Description: URL to access QRadar Console via NLB
+    Value: !Sub https://${ConsoleNLB.DNSName}
+
+  SyslogEndpointTCP:
+    Description: Syslog TCP endpoint (EP NLB)
+    Value: !Sub ${EPNLB.DNSName}:514
+
+  SyslogEndpointUDP:
+    Description: Syslog UDP endpoint (EP NLB)
+    Value: !Sub ${EPNLB.DNSName}:514
+
+  SyslogEndpointTLS:
+    Description: Syslog TLS endpoint (EP NLB)
+    Value: !Sub ${EPNLB.DNSName}:6514
+
+# Made with Bob
+
