@@ -1,6 +1,6 @@
 # QRadar High Availability Reference Architecture - CloudFormation Template
 
-This CloudFormation template deploys the complete VPC infrastructure and EC2 instances for a highly available QRadar SIEM deployment on AWS.
+This CloudFormation template deploys the complete VPC infrastructure and EC2 instances for a highly available QRadar SIEM deployment on AWS. See [Network Archotecture](NETWORK_ARCHITECTURE.md) for details of the infrastructure design.
 
 ## Architecture Overview
 
